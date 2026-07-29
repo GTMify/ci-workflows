@@ -1,0 +1,80 @@
+name: self-test
+
+# This repo cannot call its own reusable workflow to gate itself without a
+# circular dependency, so it runs the same checks directly.
+#
+# Dogfooding matters more here than anywhere else: a defect in these scripts does
+# not break one repo, it silently weakens the gate on every repo that calls them.
+# The scripts are also the last place a broken check would be noticed, because a
+# gate that wrongly passes looks exactly like a gate that works.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test and lint the gate scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Syntax-check every script
+        run: |
+          set -euo pipefail
+          for f in scripts/*.sh tests/*.sh; do
+            bash -n "$f"
+            echo "ok $f"
+          done
+
+      - name: shellcheck
+        # Preinstalled on the ubuntu runner images.
+        run: shellcheck --severity=warning scripts/*.sh tests/*.sh
+
+      - name: Run the junk-gate test suite
+        run: bash tests/junk_file_gate_test.sh
+
+      - name: Prove the suite can fail
+        # A test suite that has only ever been seen passing is indistinguishable
+        # from one that asserts nothing. Break the gate on purpose, require the
+        # suite to go red, then restore it and require green. This exact check
+        # caught two false greens in the app repo.
+        run: |
+          set -euo pipefail
+          cp scripts/junk_file_gate.sh /tmp/gate.bak
+
+          python3 <<'PY'
+          import pathlib, sys
+          p = pathlib.Path("scripts/junk_file_gate.sh")
+          t = p.read_text()
+          needle = ".claude/worktrees/*|*/.claude/worktrees/*)"
+          if needle not in t:
+              sys.exit("mutation target not found; update this step alongside the gate")
+          p.write_text(t.replace(needle, "__MUTANT_NEVER_MATCHES__)", 1))
+          PY
+
+          rc=0
+          bash tests/junk_file_gate_test.sh >/tmp/mutant.out 2>&1 || rc=$?
+          cp /tmp/gate.bak scripts/junk_file_gate.sh
+
+          if [ "$rc" -eq 0 ]; then
+            echo "!! The suite PASSED with the worktree pattern removed."
+            echo "   The tests are not asserting what they claim to assert."
+            tail -20 /tmp/mutant.out
+            exit 1
+          fi
+          echo ">> Mutation correctly turned the suite red."
+
+          bash tests/junk_file_gate_test.sh
+          echo ">> Restored gate is green again."
+
+      - name: Gate this repo with its own junk check
+        run: bash scripts/junk_file_gate.sh --audit

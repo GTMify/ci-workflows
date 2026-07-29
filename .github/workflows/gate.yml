@@ -1,0 +1,172 @@
+name: gate
+
+# Shared quality gate, called by every GTMify repo except GTMify/GTMify (the app),
+# which has its own three workflows built around platformOS constraints that apply
+# nowhere else.
+#
+# WHY THIS LIVES IN A PUBLIC REPO
+#
+# A private reusable workflow can only be called from within the same organization
+# or user account. Four of the active repos live under the personal
+# scott-wueschinski-GTMify account rather than the GTMify org, so an org-private
+# host would have reached six of ten and left the rest on a vendored copy that
+# drifts. A public workflow is callable from any repo, private ones included.
+# Nothing secret lives here: workflow YAML and check scripts only.
+#
+# ENFORCEMENT, AND ITS LIMIT
+#
+# The GTMify org is on the free plan, where branch protection and rulesets return
+# 403 on private repos. These checks therefore RUN and show red on a pull request,
+# but cannot be made required. Real enforcement for the junk gate comes from the
+# local pre-commit hook in gtmify-config, which blocks junk before it can be
+# committed at all, and does not depend on a GitHub plan.
+
+on:
+  workflow_call:
+    inputs:
+      tier:
+        description: "a = config repo, b = builds and deploys, c = content only"
+        required: true
+        type: string
+      build_cmd:
+        description: "Tier B only. Shell command that must succeed, e.g. 'npm ci && npm run build'"
+        required: false
+        type: string
+        default: ""
+      node_version:
+        description: "Tier B only. Node version for the build step."
+        required: false
+        type: string
+        default: "24"
+      house_style:
+        description: >
+          Off by default and deliberately so. The linter lives in the PRIVATE
+          GTMify/claude-house-style repo, which this public workflow cannot read
+          without a token. Turning this on requires passing house_style_token.
+          Resolve by either making that linter public or minting a read-only PAT;
+          until then house style is enforced by the local write-time hook, which
+          already covers the common case.
+        required: false
+        type: boolean
+        default: false
+      ci_ref:
+        description: "Ref of this repo to load scripts from. Keep in step with the caller's `uses:` tag."
+        required: false
+        type: string
+        default: "v1"
+    secrets:
+      house_style_token:
+        description: "Read access to GTMify/claude-house-style. Only needed when house_style is true."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: "gate (tier ${{ inputs.tier }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the calling repository
+        uses: actions/checkout@v4
+        with:
+          # Full history: the junk gate diffs against the pull request base, and a
+          # shallow clone has no base commit to diff against.
+          fetch-depth: 0
+
+      - name: Check out the shared check scripts
+        uses: actions/checkout@v4
+        with:
+          repository: GTMify/ci-workflows
+          ref: ${{ inputs.ci_ref }}
+          path: .ci-workflows
+
+      - name: Resolve the comparison base
+        id: base
+        # On a pull request, compare against its base branch. On a manual dispatch
+        # there is no base, so fall back to auditing every tracked file, which makes
+        # `workflow_dispatch` the cleanup tool for a repo that already carries junk.
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.ref }}"
+            git fetch --no-tags --quiet origin "$base"
+            echo "mode=diff" >> "$GITHUB_OUTPUT"
+            echo "ref=origin/$base" >> "$GITHUB_OUTPUT"
+            echo "comparing against origin/$base"
+          else
+            echo "mode=audit" >> "$GITHUB_OUTPUT"
+            echo "ref=" >> "$GITHUB_OUTPUT"
+            echo "no pull request base; auditing every tracked file"
+          fi
+
+      - name: Junk-file gate
+        # Runs on every tier. This is the check that pays for itself: nothing
+        # stopped 33 worktree gitlinks and a SQLite write-ahead log from becoming
+        # tracked in the app repo, which drove local master 19 commits off origin.
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.base.outputs.mode }}" = "audit" ]; then
+            bash .ci-workflows/scripts/junk_file_gate.sh --audit
+          else
+            bash .ci-workflows/scripts/junk_file_gate.sh --base "${{ steps.base.outputs.ref }}"
+          fi
+
+      - name: Shell gate
+        if: inputs.tier == 'a' || inputs.tier == 'b'
+        # shellcheck is preinstalled on the ubuntu runner images.
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.base.outputs.mode }}" = "audit" ]; then
+            bash .ci-workflows/scripts/shell_gate.sh --audit
+          else
+            bash .ci-workflows/scripts/shell_gate.sh --base "${{ steps.base.outputs.ref }}"
+          fi
+
+      - name: Set up Node
+        if: inputs.tier == 'b' && inputs.build_cmd != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Build
+        if: inputs.tier == 'b' && inputs.build_cmd != ''
+        # The point is to fail on the pull request rather than at deploy time.
+        # Several of these repos deploy through Vercel, which builds anyway; the
+        # gap this closes is that a broken build was only discovered after merge.
+        run: ${{ inputs.build_cmd }}
+
+      - name: Check out the house-style linter
+        if: inputs.house_style
+        uses: actions/checkout@v4
+        with:
+          repository: GTMify/claude-house-style
+          path: .house-style
+          token: ${{ secrets.house_style_token }}
+
+      - name: House-style gate
+        if: inputs.house_style
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.base.outputs.mode }}" = "audit" ]; then
+            files="$(git ls-files -- '*.md')"
+          else
+            files="$(git diff --name-only --diff-filter=AM "${{ steps.base.outputs.ref }}...HEAD" -- '*.md')"
+          fi
+          if [ -z "$files" ]; then
+            echo ">> house style: no markdown in scope."
+            exit 0
+          fi
+          failures=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            rc=0
+            python3 .house-style/lint/housestyle.py --file "$f" --persona gtmify || rc=$?
+            [ "$rc" -ne 0 ] && failures=$((failures + 1))
+          done <<< "$files"
+          if [ "$failures" -ne 0 ]; then
+            echo "!! house style FAILED on ${failures} file(s)."
+            exit 1
+          fi
+          echo ">> house style passed."
