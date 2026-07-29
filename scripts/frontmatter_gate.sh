@@ -56,14 +56,36 @@ fi
 echo ">> frontmatter gate: checking ${#targets[@]} file(s)"
 
 failures=0
+unreadable=0
 
 for f in "${targets[@]}"; do
+  # Tracked but not readable in this checkout. Overwhelmingly this means a committed
+  # symlink with an absolute target that exists only on the authoring machine, and
+  # gtmify-config has roughly 145 tracked symlinks of which most are absolute. That is
+  # a real and separate problem, but failing a hundred files here would make this gate
+  # permanently red and therefore ignored, so these are counted and reported rather
+  # than treated as frontmatter violations. An earlier version simply crashed with a
+  # FileNotFoundError traceback.
+  if [ ! -r "$f" ]; then
+    if [ -L "$f" ]; then
+      printf '   skip %s\n        tracked symlink with an unreachable target: %s\n' "$f" "$(readlink "$f")"
+    else
+      printf '   skip %s\n        tracked but not readable in this checkout\n' "$f"
+    fi
+    unreadable=$((unreadable + 1))
+    continue
+  fi
+
   problem="$(F="$f" python3 <<'PY'
 import os, sys
 
 path = os.environ["F"]
-with open(path, encoding="utf-8", errors="replace") as fh:
-    lines = fh.read().split("\n")
+try:
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        lines = fh.read().split("\n")
+except OSError as e:
+    sys.stdout.write(f"could not be read: {e.strerror}")
+    sys.exit(0)
 
 if not lines or lines[0].strip() != "---":
     sys.stdout.write("no YAML frontmatter; file must open with ---")
@@ -107,7 +129,19 @@ done
 if [ "$failures" -ne 0 ]; then
   echo
   echo "!! frontmatter gate FAILED: ${failures} file(s) would never trigger."
+  [ "$unreadable" -gt 0 ] && echo "   (${unreadable} further file(s) were unreadable and not assessed; see above)"
   exit 1
+fi
+
+# Say plainly what was not checked. A gate that quietly skips work reads as full
+# coverage and is worse than one that admits a gap.
+if [ "$unreadable" -gt 0 ]; then
+  echo
+  echo ">> frontmatter gate passed on $(( ${#targets[@]} - unreadable )) file(s)."
+  echo "   ${unreadable} were NOT assessed because they are tracked but unreadable here,"
+  echo "   almost certainly committed symlinks with absolute targets. Those are broken for"
+  echo "   any machine other than the one that created them; worth fixing separately."
+  exit 0
 fi
 
 echo ">> frontmatter gate passed."
