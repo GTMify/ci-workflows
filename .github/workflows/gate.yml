@@ -124,6 +124,26 @@ jobs:
             bash .ci-workflows/scripts/shell_gate.sh --base "${{ steps.base.outputs.ref }}"
           fi
 
+      - name: Settings gate
+        if: inputs.tier == 'a'
+        # Resolves every script path settings.json references and asserts it exists
+        # and is executable. Rewrites the "$HOME"/.claude/ prefix to the repo root,
+        # because CI has no ~/.claude and every hook would otherwise read as missing.
+        run: bash .ci-workflows/scripts/settings_gate.sh
+
+      - name: Hook smoke
+        if: inputs.tier == 'a'
+        # Only runs hooks that advertise a --dry-run flag. A hook is arbitrary code
+        # with side effects (one commits and pushes), so anything without a declared
+        # no-op mode is reported as skipped rather than executed.
+        run: bash .ci-workflows/scripts/hook_smoke.sh
+
+      - name: Frontmatter gate
+        if: inputs.tier == 'a'
+        # A skill with no description never triggers, and never errors either. It
+        # looks installed and does nothing.
+        run: bash .ci-workflows/scripts/frontmatter_gate.sh
+
       - name: Set up Node
         if: inputs.tier == 'b' && inputs.build_cmd != ''
         uses: actions/setup-node@v4
