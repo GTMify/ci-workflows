@@ -1,0 +1,29 @@
+# This repo is the reference implementation for the junk-file gate, so it should
+# not rely on that gate to keep itself clean. Ignore first, gate second.
+
+# Tool-managed git worktrees
+.claude/worktrees/
+
+# platformOS session telemetry
+.pos-supervisor/
+pos-supervisor.jsonl
+
+# Credentials, never tracked. Templates and sops-encrypted files are allowed.
+.pos
+.pos-*
+.siteglide-config
+*.token
+*.secret
+.env
+.env.local
+.env.*.local
+
+# Generated
+node_modules/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+Icon?
+._*
