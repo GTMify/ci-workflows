@@ -39,8 +39,13 @@ jobs:
         # Preinstalled on the ubuntu runner images.
         run: shellcheck --severity=warning scripts/*.sh tests/*.sh
 
-      - name: Run the junk-gate test suite
-        run: bash tests/junk_file_gate_test.sh
+      - name: Run every test suite
+        run: |
+          set -euo pipefail
+          for t in tests/*_test.sh; do
+            echo "──── $t ────"
+            bash "$t"
+          done
 
       - name: Prove the suite can fail
         # A test suite that has only ever been seen passing is indistinguishable
