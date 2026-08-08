@@ -147,6 +147,21 @@ PATTERNS = [
 ]
 
 # ── VALUE layer ──────────────────────────────────────────────────────────────
+# Not every long env value is a secret. An audit of gtmify-config surfaced
+# SUPABASE_URL and SUPERGROW_WORKSPACE_ID this way: a URL and an identifier,
+# both harmless, both over 20 chars. Blocking on those would have made the gate
+# fire on legitimate commits, which is how a gate earns a permanent --no-verify.
+NON_SECRET_NAME = re.compile(
+    r"_(URL|URI|ID|HOST|HOSTNAME|DOMAIN|REGION|PROJECT|WORKSPACE|WORKSPACE_ID|BASE|"
+    r"BASE_URL|ACCOUNT|EMAIL|USER|USERNAME|PATH|DIR|REF|SLUG|MODE|ENV|VERSION|NAME|"
+    r"CHANNEL|TEAM|ORG|BUCKET|TABLE|DB|DATABASE|PORT|TIMEOUT|LOCALE)$")
+
+# Keys that are publishable BY DESIGN. A Supabase anon key ships in browser
+# JavaScript; treating it as a leak would block legitimate client config and
+# teach people to bypass the gate. Row-level security, not secrecy, is what
+# protects these.
+PUBLISHABLE_NAME = re.compile(r"(ANON_KEY|PUBLISHABLE_KEY|PUBLIC_KEY|_PUBLIC$|CLIENT_ID)$")
+
 def load_env_values():
     vals = {}
     for envf in (pathlib.Path.home() / ".claude/.env",
@@ -158,9 +173,16 @@ def load_env_values():
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 k, v = line.split("=", 1)
+                k = k.strip()
                 v = v.strip().strip("'").strip('"')
-                if len(v) >= 20 and not PLACEHOLDER.search(v):
-                    vals[v] = k.strip()
+                if len(v) < 20 or PLACEHOLDER.search(v):
+                    continue
+                if NON_SECRET_NAME.search(k) or PUBLISHABLE_NAME.search(k):
+                    continue
+                # A URL or an email address is a locator, not a credential.
+                if "://" in v or "@" in v:
+                    continue
+                vals[v] = k
         except Exception:
             continue
     return vals
@@ -201,6 +223,12 @@ for p in paths:
     # PATTERN layer.
     for i, line in enumerate(lines, 1):
         if PLACEHOLDER.search(line):
+            continue
+        # An AWS key inside X-Amz-Credential is a presigned-URL credential: STS
+        # temporary, scoped to one object, and already expired by the time it is
+        # committed. Found in tracked bank-statement exports, where blocking
+        # would be noise rather than protection.
+        if "X-Amz-Credential" in line or "X-Amz-Signature" in line:
             continue
         for label, rx in PATTERNS:
             if rx.search(line):
