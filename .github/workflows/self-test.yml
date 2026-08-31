@@ -116,6 +116,41 @@ jobs:
           bash tests/secret_scan_gate_test.sh
           echo ">> Restored gate is green again."
 
+      - name: Prove the suite still sees the vendor cause
+        # GTM-1590 had TWO independent causes and the step above pins only the
+        # first. Mutating one cause proves nothing about the other, and the
+        # vendor skip is the half that reaches first-party content, so it gets
+        # its own restore-and-go-red rather than riding on the rename drill.
+        run: |
+          set -euo pipefail
+          cp scripts/secret_scan_gate.sh /tmp/secret_gate2.bak
+
+          python3 <<'PY'
+          import pathlib, sys
+          p = pathlib.Path("scripts/secret_scan_gate.sh")
+          t = p.read_text()
+          needle = 'SKIP_DIRS = ("node_modules/", ".git/", "dist/", "build/")'
+          if needle not in t:
+              sys.exit("mutation target not found; update this step alongside the gate")
+          mutant = 'SKIP_DIRS = ("node_modules/", ".git/", "vendor/", "dist/", "build/")'
+          p.write_text(t.replace(needle, mutant, 1))
+          PY
+
+          rc=0
+          bash tests/secret_scan_gate_test.sh >/tmp/secret_mutant2.out 2>&1 || rc=$?
+          cp /tmp/secret_gate2.bak scripts/secret_scan_gate.sh
+
+          if [ "$rc" -eq 0 ]; then
+            echo "!! The suite PASSED with vendor/ skipped unconditionally again."
+            echo "   First-party vendor content would go unscanned and nothing would say so."
+            tail -20 /tmp/secret_mutant2.out
+            exit 1
+          fi
+          echo ">> Mutation correctly turned the suite red."
+
+          bash tests/secret_scan_gate_test.sh
+          echo ">> Restored gate is green again."
+
       - name: Gate this repo with its own junk check
         run: bash scripts/junk_file_gate.sh --audit
 
