@@ -81,5 +81,46 @@ jobs:
           bash tests/junk_file_gate_test.sh
           echo ">> Restored gate is green again."
 
+      - name: Prove the secret-scan suite can fail
+        # Same reasoning as the step above, applied to the gate where a false
+        # green is most expensive. The mutation restores the exact defect that
+        # GTM-1590 fixed: --diff-filter=ACM drops renamed files, so an
+        # edited-and-moved file ships unscanned. That shipped for weeks and the
+        # gate reported "passed" every time, so the suite has to be able to see it.
+        run: |
+          set -euo pipefail
+          cp scripts/secret_scan_gate.sh /tmp/secret_gate.bak
+
+          python3 <<'PY'
+          import pathlib, sys
+          p = pathlib.Path("scripts/secret_scan_gate.sh")
+          t = p.read_text()
+          needle = "--diff-filter=ACMRT)"
+          if needle not in t:
+              sys.exit("mutation target not found; update this step alongside the gate")
+          p.write_text(t.replace(needle, "--diff-filter=ACM)", 1))
+          PY
+
+          rc=0
+          bash tests/secret_scan_gate_test.sh >/tmp/secret_mutant.out 2>&1 || rc=$?
+          cp /tmp/secret_gate.bak scripts/secret_scan_gate.sh
+
+          if [ "$rc" -eq 0 ]; then
+            echo "!! The suite PASSED with renamed files excluded from the scan."
+            echo "   The tests are not asserting what they claim to assert."
+            tail -20 /tmp/secret_mutant.out
+            exit 1
+          fi
+          echo ">> Mutation correctly turned the suite red."
+
+          bash tests/secret_scan_gate_test.sh
+          echo ">> Restored gate is green again."
+
       - name: Gate this repo with its own junk check
         run: bash scripts/junk_file_gate.sh --audit
+
+      - name: Gate this repo with its own secret scan
+        # Dogfooding, and it is not free: the scanner's own source describes the
+        # shapes it detects, so this step is what keeps those descriptions written
+        # as prose rather than as quoted literals.
+        run: bash scripts/secret_scan_gate.sh --audit
