@@ -142,7 +142,19 @@ if [ -z "$PATHS" ]; then
   exit 0
 fi
 
-SSG_LIST=$(mktemp -t ssg_paths)
+# `mktemp -t ssg_paths` is a BSD spelling: macOS treats the argument as a PREFIX and
+# appends its own randomness, GNU coreutils treats it as a TEMPLATE and refuses with
+# "too few X's in template". This gate had only ever run on macOS, so on every Linux
+# host it produced an empty $SSG_LIST, handed python an empty path, and died with
+# IsADirectoryError. Found by the new test suite on the first CI run, 2026-08-31.
+#
+# It failed CLOSED, so nothing was let through, but a gate that crashes on every
+# commit is a gate that gets uninstalled. An explicit template works on both.
+SSG_LIST=$(mktemp "${TMPDIR:-/tmp}/ssg_paths.XXXXXX")
+if [ -z "$SSG_LIST" ] || [ ! -f "$SSG_LIST" ]; then
+  echo ">> secret scan ERROR: could not create a temporary file. Nothing was scanned." >&2
+  exit 1
+fi
 printf '%s\n' "$PATHS" > "$SSG_LIST"
 trap 'rm -f "$SSG_LIST"' EXIT
 export SSG_LIST SSG_MODE="$MODE" SSG_TOTAL
