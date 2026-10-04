@@ -65,18 +65,18 @@ permissions:
 jobs:
   gate:
     name: "gate (tier ${{ inputs.tier }})"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check out the calling repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # Full history: the junk gate diffs against the pull request base, and a
           # shallow clone has no base commit to diff against.
           fetch-depth: 0
 
       - name: Check out the shared check scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: GTMify/ci-workflows
           ref: ${{ inputs.ci_ref }}
@@ -146,7 +146,7 @@ jobs:
 
       - name: Set up Node
         if: inputs.tier == 'b' && inputs.build_cmd != ''
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ inputs.node_version }}
 
@@ -159,7 +159,7 @@ jobs:
 
       - name: Check out the house-style linter
         if: inputs.house_style
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: GTMify/claude-house-style
           path: .house-style
