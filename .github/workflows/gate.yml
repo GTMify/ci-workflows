@@ -120,11 +120,13 @@ jobs:
         # PATTERN layer runs here: CI has no env file, so the value layer reports
         # itself unavailable.
         #
-        # An empty scan is refused rather than passed. The script exits 0 on
+        # A short scan is refused rather than passed. The script exits 0 on
         # "0 of N checked" (on #768 an amend checked 0 paths and passed), so this
-        # step counts the non-deletion paths itself and fails when the scan read
-        # none of them. A deletion-only or empty diff has nothing to read and
-        # passes. tests/gate_secret_scan_wiring.sh runs this block verbatim.
+        # step counts the non-deletion paths itself and fails when the script
+        # neither read nor named a reason for skipping every one of them, or
+        # prints no summary line. An image-only or allowlisted-only diff is
+        # accounted for and passes, as do deletion-only and empty diffs.
+        # tests/gate_secret_scan_wiring.sh runs this block verbatim.
         run: |
           set -euo pipefail
           if [ "${{ steps.base.outputs.mode }}" = "audit" ]; then
@@ -145,11 +147,31 @@ jobs:
             echo "!! secret scan printed no 'N of M path(s) checked' line, so its coverage is unknown. Refusing."
             exit 1
           fi
-          if [ "$checked" -eq 0 ] && [ "$in_scope" -gt 0 ]; then
-            echo "!! secret scan checked 0 paths while ${in_scope} non-deletion path(s) are in scope. An empty scan is not a pass."
+          # Accounted for = read + the skips the script itself NAMES with a reason
+          # on its ">>   skipped: N reason, N reason" line. Parsed, never
+          # re-derived here. "deleted" is left out because in_scope already
+          # excludes deletions, so counting it would let one deletion cover for
+          # one unread changed path.
+          skipped=0
+          rest=$(printf '%s\n' "$out" | sed -n 's/^>>   skipped: //p' | head -n 1)
+          while [ -n "$rest" ]; do
+            part=${rest%%, *}
+            if [ "$part" = "$rest" ]; then rest=""; else rest=${rest#*, }; fi
+            n=${part%% *}
+            reason=${part#* }
+            case "$n" in
+              ''|*[!0-9]*) echo "!! secret scan printed an unparseable skip entry, so its coverage is unknown. Refusing."; exit 1 ;;
+            esac
+            if [ "$reason" != "deleted" ]; then
+              skipped=$((skipped + n))
+            fi
+          done
+          accounted=$((checked + skipped))
+          if [ "$accounted" -lt "$in_scope" ]; then
+            echo "!! secret scan accounted for ${accounted} (${checked} read, ${skipped} skipped with a reason) of ${in_scope} non-deletion path(s) in scope. A path it neither read nor named is not a pass."
             exit 1
           fi
-          echo ">> secret scan step: ${checked} path(s) read, ${in_scope} non-deletion path(s) in scope."
+          echo ">> secret scan step: ${checked} read plus ${skipped} named skip(s) = ${accounted} accounted for, of ${in_scope} non-deletion path(s) in scope."
 
       - name: Shell gate
         if: inputs.tier == 'a' || inputs.tier == 'b'

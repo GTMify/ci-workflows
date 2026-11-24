@@ -71,7 +71,9 @@ git -C "$FX" config commit.gpgsign false
 git -C "$FX" config core.hooksPath /dev/null
 printf 'fixture\n' > "$FX/README.md"
 printf 'to be deleted\n' > "$FX/old.txt"
-git -C "$FX" add README.md old.txt
+# The fixture repo's OWN allowlist, read by the unchanged script at run time.
+printf 'allowed.txt  # fixture: allowlisted-only case\n' > "$FX/.secret-scan-allow"
+git -C "$FX" add README.md old.txt .secret-scan-allow
 git -C "$FX" commit -q -m base
 # The step calls .ci-workflows/scripts/..., exactly as the caller checkout lays it out.
 ln -s "$ROOT" "$FX/.ci-workflows"
@@ -131,18 +133,64 @@ scenario empty
 run_step diff main
 expect "empty diff passes" 0 "0 of 0 path(s) checked"
 
-# Zero read with a non-deletion path in scope: the script itself passes
-# ("0 of 1 checked, 1 skipped"), and the step must refuse it.
-scenario zero
+# Image-only head: the real script reads 0 but NAMES the skip, so it is
+# accounted for and passes (round 2 narrowed this from red).
+scenario image
 printf 'not really an image\n' > "$FX/pixel.png"
-git -C "$FX" add pixel.png && git -C "$FX" commit -q -m zero
+git -C "$FX" add pixel.png && git -C "$FX" commit -q -m image
 run_step diff main
-expect "0 checked with a non-deletion path is refused" nonzero "An empty scan is not a pass"
+expect "image-only head passes, skip named by the script" 0 "0 read plus 1 named skip(s) = 1 accounted for, of 1"
+
+# Allowlisted-only head, allowlisted in the fixture repo's own .secret-scan-allow.
+scenario allowlisted
+printf 'plain text\n' > "$FX/allowed.txt"
+git -C "$FX" add allowed.txt && git -C "$FX" commit -q -m allowlisted
+run_step diff main
+expect "allowlisted-only head passes, skip named by the script" 0 "0 read plus 1 named skip(s) = 1 accounted for, of 1"
+
+# Both skip reasons on one ">>   skipped: N a, N b" line, plus a read path, so
+# the step's comma parse runs against the real script's multi-reason output.
+git -C "$FX" checkout -q -B mixed allowlisted
+printf 'not really an image\n' > "$FX/pixel.png"
+printf 'plain text\n' > "$FX/notes.txt"
+git -C "$FX" add pixel.png notes.txt && git -C "$FX" commit -q -m mixed
+run_step diff main
+expect "mixed head passes, two named reasons parsed" 0 "1 read plus 2 named skip(s) = 3 accounted for, of 3"
 
 # Audit mode (workflow_dispatch) on the clean green tree.
 git -C "$FX" checkout -q green
 run_step audit ""
-expect "audit mode passes on a clean tree" 0 "3 of 3 path(s) checked"
+expect "audit mode passes on a clean tree" 0 "4 of 4 path(s) checked"
+
+# ── Stubbed script: output that under-counts, without touching the real one ──
+STUB="$WORK/stub"
+mkdir -p "$STUB/scripts"
+use_stub() {  # use_stub <stdout of the stubbed secret_scan_gate.sh>
+  printf '#!/usr/bin/env bash\ncat <<'"'"'OUT'"'"'\n%s\nOUT\n' "$1" > "$STUB/scripts/secret_scan_gate.sh"
+  ln -sfn "$STUB" "$FX/.ci-workflows"
+}
+use_real() { ln -sfn "$ROOT" "$FX/.ci-workflows"; }
+
+# A text path the script neither read nor named a reason for.
+scenario unaccounted
+printf 'plain text\n' > "$FX/notes.txt"
+git -C "$FX" add notes.txt && git -C "$FX" commit -q -m unaccounted
+use_stub ">> secret scan passed. 0 of 1 path(s) checked, mode=diff."
+run_step diff main
+expect "stub: an unaccounted text path is refused" nonzero "accounted for 0 (0 read, 0 skipped with a reason) of 1"
+
+# A deletion must not cover for an unread changed path.
+git -C "$FX" rm -q old.txt && git -C "$FX" commit -q -m "plus a deletion"
+use_stub ">> secret scan passed. 0 of 2 path(s) checked, mode=diff.
+>>   skipped: 1 deleted"
+run_step diff main
+expect "stub: a deletion skip does not cover an unread path" nonzero "accounted for 0 (0 read, 0 skipped with a reason) of 1"
+
+# No summary line at all.
+use_stub ">> secret scan skipped: no python3"
+run_step diff main
+expect "stub: a missing summary line is refused" nonzero "coverage is unknown"
+use_real
 
 echo ""
 echo "gate secret-scan wiring: ${pass} passed, ${fail} failed, of $((pass + fail))."
