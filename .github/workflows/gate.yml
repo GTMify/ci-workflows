@@ -113,6 +113,107 @@ jobs:
             bash .ci-workflows/scripts/junk_file_gate.sh --base "${{ steps.base.outputs.ref }}"
           fi
 
+      - name: Secret scan
+        if: inputs.tier == 'a'
+        # GTM-8555. The same scripts/secret_scan_gate.sh the gtmify-config
+        # pre-commit hook runs, so CI and the hook apply one rule set. Only the
+        # PATTERN layer runs here: CI has no env file, so the value layer reports
+        # itself unavailable.
+        #
+        # A short scan is refused rather than passed. The script exits 0 on
+        # "0 of N checked" (on #768 an amend checked 0 paths and passed), so this
+        # step counts the non-deletion paths itself and fails when the script
+        # neither read nor named a reason for skipping every one of them, or
+        # prints no summary line. An image-only or allowlisted-only diff is
+        # accounted for and passes, as do deletion-only and empty diffs.
+        # tests/gate_secret_scan_wiring.sh runs this block verbatim.
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.base.outputs.mode }}" = "audit" ]; then
+            in_scope=$(git ls-files | wc -l | tr -d ' ')
+            allow_touched=0
+            rc=0
+            out=$(bash .ci-workflows/scripts/secret_scan_gate.sh --audit 2>&1) || rc=$?
+          else
+            in_scope=$(git diff --name-only --diff-filter=ACMRT "${{ steps.base.outputs.ref }}...HEAD" | wc -l | tr -d ' ')
+            # Any status, unfiltered: an added, edited or deleted allowlist all count.
+            allow_touched=$(git diff --name-only "${{ steps.base.outputs.ref }}...HEAD" -- .secret-scan-allow | wc -l | tr -d ' ')
+            rc=0
+            out=$(bash .ci-workflows/scripts/secret_scan_gate.sh --base "${{ steps.base.outputs.ref }}" 2>&1) || rc=$?
+          fi
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+          summary=$(printf '%s\n' "$out" | sed -n 's/^>> secret scan passed\. \([0-9][0-9]*\) of \([0-9][0-9]*\) path(s) checked.*/\1 \2/p' | head -n 1)
+          if [ -z "$summary" ]; then
+            echo "!! secret scan printed no 'N of M path(s) checked' line, so its coverage is unknown. Refusing."
+            exit 1
+          fi
+          checked=${summary% *}
+          total=${summary#* }
+          # Accounted for = read + the skips the script itself NAMES with a reason
+          # on its ">>   skipped: N reason, N reason" line. Parsed, never
+          # re-derived here. "deleted" is kept apart because in_scope already
+          # excludes deletions, so counting it would let one deletion cover for
+          # one unread changed path.
+          skipped=0
+          deleted=0
+          allowlisted=0
+          rest=$(printf '%s\n' "$out" | sed -n 's/^>>   skipped: //p' | head -n 1)
+          while [ -n "$rest" ]; do
+            part=${rest%%, *}
+            if [ "$part" = "$rest" ]; then rest=""; else rest=${rest#*, }; fi
+            n=${part%% *}
+            reason=${part#* }
+            case "$n" in
+              ''|*[!0-9]*) echo "!! secret scan printed an unparseable skip entry, so its coverage is unknown. Refusing."; exit 1 ;;
+            esac
+            if [ "$reason" = "deleted" ]; then
+              deleted=$((deleted + n))
+            else
+              skipped=$((skipped + n))
+            fi
+            if [ "$reason" = "allowlisted in .secret-scan-allow" ]; then
+              allowlisted=$((allowlisted + n))
+            fi
+          done
+          # Coverage must match EXACTLY. Fewer is a path neither read nor named;
+          # more is an impossible count, so the summary cannot be trusted either.
+          accounted=$((checked + skipped))
+          if [ "$accounted" -lt "$in_scope" ]; then
+            echo "!! secret scan under-count: accounted for ${accounted} (${checked} read, ${skipped} skipped with a reason) of ${in_scope} non-deletion path(s) in scope. A path it neither read nor named is not a pass."
+            exit 1
+          fi
+          if [ "$accounted" -gt "$in_scope" ]; then
+            echo "!! secret scan over-count: accounted for ${accounted} (${checked} read, ${skipped} skipped with a reason) but only ${in_scope} non-deletion path(s) are in scope. An impossible count is not a pass."
+            exit 1
+          fi
+          # The script's M, compared like with like. In secret_scan_gate.sh, M is
+          # SSG_TOTAL, the line count of ALL_PATHS (lines 129-133, printed at
+          # 421-428): in diff mode every status of "git diff --name-only
+          # BASE...HEAD" (line 118), in audit mode "git ls-files" (line 111). The
+          # scanned list PATHS is the ACMRT subset (line 119), or ALL_PATHS itself
+          # in audit (line 112). It names the difference "deleted": total minus
+          # len(paths) at lines 422-424, or all of M on the no-paths branch at
+          # lines 135-141. ACMRT is in_scope here, so the exact relation is
+          #   M == in_scope + deleted
+          # where deleted is that named skip, 0 when absent and always 0 in audit.
+          if [ "$total" -ne $((in_scope + deleted)) ]; then
+            echo "!! secret scan M mismatch: the script says ${total} path(s) in scope, but this step counts ${in_scope} non-deletion plus ${deleted} deleted = $((in_scope + deleted)). The script and the step disagree on the diff."
+            exit 1
+          fi
+          # The script reads .secret-scan-allow from the working tree (line 193),
+          # so a PR could add a secret AND the allowlist line that exempts it, and
+          # every count above would balance. Diff mode only, and no parsing of the
+          # allowlist here: if this PR touches the file and the scan skipped
+          # anything as allowlisted, refuse. The script-level fix is GTM-8560.
+          if [ "$allow_touched" -gt 0 ] && [ "$allowlisted" -gt 0 ]; then
+            echo "!! secret scan allowlist refusal: this PR changes .secret-scan-allow and the scan skipped ${allowlisted} path(s) as allowlisted. An allowlist change must merge in its own PR first."
+            exit 1
+          fi
+          echo ">> secret scan step: ${checked} read plus ${skipped} named skip(s) = ${accounted} accounted for, of ${in_scope} non-deletion path(s) in scope; M ${total} = ${in_scope} + ${deleted} deleted."
+
       - name: Shell gate
         if: inputs.tier == 'a' || inputs.tier == 'b'
         # shellcheck is preinstalled on the ubuntu runner images.
