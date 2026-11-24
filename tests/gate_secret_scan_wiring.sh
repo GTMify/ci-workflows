@@ -157,6 +157,16 @@ git -C "$FX" add pixel.png notes.txt && git -C "$FX" commit -q -m mixed
 run_step diff main
 expect "mixed head passes, two named reasons parsed" 0 "1 read plus 2 named skip(s) = 3 accounted for, of 3"
 
+# Real script, mixed WITH a deletion: one text file, one image, one deletion.
+# Exercises M == in_scope + deleted on the script's own output.
+scenario mixeddel
+printf 'not really an image\n' > "$FX/pixel.png"
+printf 'plain text\n' > "$FX/notes.txt"
+git -C "$FX" add pixel.png notes.txt
+git -C "$FX" rm -q old.txt && git -C "$FX" commit -q -m mixeddel
+run_step diff main
+expect "mixed head with a deletion passes, M = in_scope + deleted" 0 "= 2 accounted for, of 2 non-deletion path(s) in scope; M 3 = 2 + 1 deleted"
+
 # Audit mode (workflow_dispatch) on the clean green tree.
 git -C "$FX" checkout -q green
 run_step audit ""
@@ -190,6 +200,25 @@ expect "stub: a deletion skip does not cover an unread path" nonzero "accounted 
 use_stub ">> secret scan skipped: no python3"
 run_step diff main
 expect "stub: a missing summary line is refused" nonzero "coverage is unknown"
+
+# Over-count: two changed paths, a summary claiming more skips than exist.
+# M is consistent (2 = 2 + 0), so only the equality check can catch it.
+scenario overcount
+printf 'one\n' > "$FX/a.txt"
+printf 'two\n' > "$FX/b.txt"
+git -C "$FX" add a.txt b.txt && git -C "$FX" commit -q -m overcount
+use_stub ">> secret scan passed. 0 of 2 path(s) checked, mode=diff.
+>>   skipped: 3 encrypted or binary file type"
+run_step diff main
+expect "stub: skips above in_scope (over-count) are refused" nonzero "over-count: accounted for 3 (0 read, 3 skipped with a reason) but only 2"
+
+# M mismatch: coverage matches (1 read of 1), but the script's M does not.
+scenario mmismatch
+printf 'plain text\n' > "$FX/notes.txt"
+git -C "$FX" add notes.txt && git -C "$FX" commit -q -m mmismatch
+use_stub ">> secret scan passed. 1 of 5 path(s) checked, mode=diff."
+run_step diff main
+expect "stub: an M that is not in_scope + deleted is refused" nonzero "M mismatch: the script says 5 path(s) in scope, but this step counts 1 non-deletion plus 0 deleted = 1"
 use_real
 
 echo ""

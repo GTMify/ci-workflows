@@ -142,17 +142,20 @@ jobs:
           if [ "$rc" -ne 0 ]; then
             exit "$rc"
           fi
-          checked=$(printf '%s\n' "$out" | sed -n 's/^>> secret scan passed\. \([0-9][0-9]*\) of [0-9][0-9]* path(s) checked.*/\1/p' | head -n 1)
-          if [ -z "$checked" ]; then
+          summary=$(printf '%s\n' "$out" | sed -n 's/^>> secret scan passed\. \([0-9][0-9]*\) of \([0-9][0-9]*\) path(s) checked.*/\1 \2/p' | head -n 1)
+          if [ -z "$summary" ]; then
             echo "!! secret scan printed no 'N of M path(s) checked' line, so its coverage is unknown. Refusing."
             exit 1
           fi
+          checked=${summary% *}
+          total=${summary#* }
           # Accounted for = read + the skips the script itself NAMES with a reason
           # on its ">>   skipped: N reason, N reason" line. Parsed, never
-          # re-derived here. "deleted" is left out because in_scope already
+          # re-derived here. "deleted" is kept apart because in_scope already
           # excludes deletions, so counting it would let one deletion cover for
           # one unread changed path.
           skipped=0
+          deleted=0
           rest=$(printf '%s\n' "$out" | sed -n 's/^>>   skipped: //p' | head -n 1)
           while [ -n "$rest" ]; do
             part=${rest%%, *}
@@ -162,16 +165,38 @@ jobs:
             case "$n" in
               ''|*[!0-9]*) echo "!! secret scan printed an unparseable skip entry, so its coverage is unknown. Refusing."; exit 1 ;;
             esac
-            if [ "$reason" != "deleted" ]; then
+            if [ "$reason" = "deleted" ]; then
+              deleted=$((deleted + n))
+            else
               skipped=$((skipped + n))
             fi
           done
+          # Coverage must match EXACTLY. Fewer is a path neither read nor named;
+          # more is an impossible count, so the summary cannot be trusted either.
           accounted=$((checked + skipped))
           if [ "$accounted" -lt "$in_scope" ]; then
-            echo "!! secret scan accounted for ${accounted} (${checked} read, ${skipped} skipped with a reason) of ${in_scope} non-deletion path(s) in scope. A path it neither read nor named is not a pass."
+            echo "!! secret scan under-count: accounted for ${accounted} (${checked} read, ${skipped} skipped with a reason) of ${in_scope} non-deletion path(s) in scope. A path it neither read nor named is not a pass."
             exit 1
           fi
-          echo ">> secret scan step: ${checked} read plus ${skipped} named skip(s) = ${accounted} accounted for, of ${in_scope} non-deletion path(s) in scope."
+          if [ "$accounted" -gt "$in_scope" ]; then
+            echo "!! secret scan over-count: accounted for ${accounted} (${checked} read, ${skipped} skipped with a reason) but only ${in_scope} non-deletion path(s) are in scope. An impossible count is not a pass."
+            exit 1
+          fi
+          # The script's M, compared like with like. In secret_scan_gate.sh, M is
+          # SSG_TOTAL, the line count of ALL_PATHS (lines 129-133, printed at
+          # 421-428): in diff mode every status of "git diff --name-only
+          # BASE...HEAD" (line 118), in audit mode "git ls-files" (line 111). The
+          # scanned list PATHS is the ACMRT subset (line 119), or ALL_PATHS itself
+          # in audit (line 112). It names the difference "deleted": total minus
+          # len(paths) at lines 422-424, or all of M on the no-paths branch at
+          # lines 135-141. ACMRT is in_scope here, so the exact relation is
+          #   M == in_scope + deleted
+          # where deleted is that named skip, 0 when absent and always 0 in audit.
+          if [ "$total" -ne $((in_scope + deleted)) ]; then
+            echo "!! secret scan M mismatch: the script says ${total} path(s) in scope, but this step counts ${in_scope} non-deletion plus ${deleted} deleted = $((in_scope + deleted)). The script and the step disagree on the diff."
+            exit 1
+          fi
+          echo ">> secret scan step: ${checked} read plus ${skipped} named skip(s) = ${accounted} accounted for, of ${in_scope} non-deletion path(s) in scope; M ${total} = ${in_scope} + ${deleted} deleted."
 
       - name: Shell gate
         if: inputs.tier == 'a' || inputs.tier == 'b'
