@@ -159,3 +159,19 @@ jobs:
         # shapes it detects, so this step is what keeps those descriptions written
         # as prose rather than as quoted literals.
         run: bash scripts/secret_scan_gate.sh --audit
+
+  secret-scan-wired:
+    # GTM-8555. The suites above prove secret_scan_gate.sh works; this proves the
+    # "Secret scan" step in gate.yml is WIRED. It lifts the step's run block out of
+    # gate.yml, checks its tier-a guard, and executes it verbatim against throwaway
+    # fixture repositories: a secret-shaped line must fail, the clean head must pass
+    # 1 of 1, a deletion-only or empty diff must pass, and a scan that reads 0 of a
+    # non-deletion path must be refused.
+    name: Prove the gate's secret-scan step is wired
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run the Secret scan step against fixture repositories
+        run: bash tests/gate_secret_scan_wiring.sh

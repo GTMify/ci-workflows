@@ -26,9 +26,11 @@ Pin to `@v1`, never `@main`. `v1` is a tag that moves only deliberately, so a ba
 
 | Tier | For | Checks |
 | :-- | :-- | :-- |
-| `a` | The config repo | junk, shell, and the config-specific checks |
+| `a` | The config repo | junk, shell, secret scan, and the config-specific checks |
 | `b` | Repos that build and deploy | junk, shell, plus `build_cmd` must succeed |
 | `c` | Content and docs repos | junk only |
+
+The tier `a` secret scan runs `scripts/secret_scan_gate.sh` over the pull request's changed paths and refuses a scan that read 0 paths when the diff adds or changes any; in CI only its PATTERN layer runs, because no env file exists there for the VALUE layer to compare against.
 
 Tier B passes its build command in:
 

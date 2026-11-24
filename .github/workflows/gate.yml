@@ -113,6 +113,44 @@ jobs:
             bash .ci-workflows/scripts/junk_file_gate.sh --base "${{ steps.base.outputs.ref }}"
           fi
 
+      - name: Secret scan
+        if: inputs.tier == 'a'
+        # GTM-8555. The same scripts/secret_scan_gate.sh the gtmify-config
+        # pre-commit hook runs, so CI and the hook apply one rule set. Only the
+        # PATTERN layer runs here: CI has no env file, so the value layer reports
+        # itself unavailable.
+        #
+        # An empty scan is refused rather than passed. The script exits 0 on
+        # "0 of N checked" (on #768 an amend checked 0 paths and passed), so this
+        # step counts the non-deletion paths itself and fails when the scan read
+        # none of them. A deletion-only or empty diff has nothing to read and
+        # passes. tests/gate_secret_scan_wiring.sh runs this block verbatim.
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.base.outputs.mode }}" = "audit" ]; then
+            in_scope=$(git ls-files | wc -l | tr -d ' ')
+            rc=0
+            out=$(bash .ci-workflows/scripts/secret_scan_gate.sh --audit 2>&1) || rc=$?
+          else
+            in_scope=$(git diff --name-only --diff-filter=ACMRT "${{ steps.base.outputs.ref }}...HEAD" | wc -l | tr -d ' ')
+            rc=0
+            out=$(bash .ci-workflows/scripts/secret_scan_gate.sh --base "${{ steps.base.outputs.ref }}" 2>&1) || rc=$?
+          fi
+          printf '%s\n' "$out"
+          if [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+          checked=$(printf '%s\n' "$out" | sed -n 's/^>> secret scan passed\. \([0-9][0-9]*\) of [0-9][0-9]* path(s) checked.*/\1/p' | head -n 1)
+          if [ -z "$checked" ]; then
+            echo "!! secret scan printed no 'N of M path(s) checked' line, so its coverage is unknown. Refusing."
+            exit 1
+          fi
+          if [ "$checked" -eq 0 ] && [ "$in_scope" -gt 0 ]; then
+            echo "!! secret scan checked 0 paths while ${in_scope} non-deletion path(s) are in scope. An empty scan is not a pass."
+            exit 1
+          fi
+          echo ">> secret scan step: ${checked} path(s) read, ${in_scope} non-deletion path(s) in scope."
+
       - name: Shell gate
         if: inputs.tier == 'a' || inputs.tier == 'b'
         # shellcheck is preinstalled on the ubuntu runner images.
