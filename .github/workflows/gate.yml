@@ -131,10 +131,13 @@ jobs:
           set -euo pipefail
           if [ "${{ steps.base.outputs.mode }}" = "audit" ]; then
             in_scope=$(git ls-files | wc -l | tr -d ' ')
+            allow_touched=0
             rc=0
             out=$(bash .ci-workflows/scripts/secret_scan_gate.sh --audit 2>&1) || rc=$?
           else
             in_scope=$(git diff --name-only --diff-filter=ACMRT "${{ steps.base.outputs.ref }}...HEAD" | wc -l | tr -d ' ')
+            # Any status, unfiltered: an added, edited or deleted allowlist all count.
+            allow_touched=$(git diff --name-only "${{ steps.base.outputs.ref }}...HEAD" -- .secret-scan-allow | wc -l | tr -d ' ')
             rc=0
             out=$(bash .ci-workflows/scripts/secret_scan_gate.sh --base "${{ steps.base.outputs.ref }}" 2>&1) || rc=$?
           fi
@@ -156,6 +159,7 @@ jobs:
           # one unread changed path.
           skipped=0
           deleted=0
+          allowlisted=0
           rest=$(printf '%s\n' "$out" | sed -n 's/^>>   skipped: //p' | head -n 1)
           while [ -n "$rest" ]; do
             part=${rest%%, *}
@@ -169,6 +173,9 @@ jobs:
               deleted=$((deleted + n))
             else
               skipped=$((skipped + n))
+            fi
+            if [ "$reason" = "allowlisted in .secret-scan-allow" ]; then
+              allowlisted=$((allowlisted + n))
             fi
           done
           # Coverage must match EXACTLY. Fewer is a path neither read nor named;
@@ -194,6 +201,15 @@ jobs:
           # where deleted is that named skip, 0 when absent and always 0 in audit.
           if [ "$total" -ne $((in_scope + deleted)) ]; then
             echo "!! secret scan M mismatch: the script says ${total} path(s) in scope, but this step counts ${in_scope} non-deletion plus ${deleted} deleted = $((in_scope + deleted)). The script and the step disagree on the diff."
+            exit 1
+          fi
+          # The script reads .secret-scan-allow from the working tree (line 193),
+          # so a PR could add a secret AND the allowlist line that exempts it, and
+          # every count above would balance. Diff mode only, and no parsing of the
+          # allowlist here: if this PR touches the file and the scan skipped
+          # anything as allowlisted, refuse. The script-level fix is GTM-8560.
+          if [ "$allow_touched" -gt 0 ] && [ "$allowlisted" -gt 0 ]; then
+            echo "!! secret scan allowlist refusal: this PR changes .secret-scan-allow and the scan skipped ${allowlisted} path(s) as allowlisted. An allowlist change must merge in its own PR first."
             exit 1
           fi
           echo ">> secret scan step: ${checked} read plus ${skipped} named skip(s) = ${accounted} accounted for, of ${in_scope} non-deletion path(s) in scope; M ${total} = ${in_scope} + ${deleted} deleted."

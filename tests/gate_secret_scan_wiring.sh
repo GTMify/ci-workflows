@@ -172,6 +172,24 @@ git -C "$FX" checkout -q green
 run_step audit ""
 expect "audit mode passes on a clean tree" 0 "4 of 4 path(s) checked"
 
+# Same-PR allowlist smuggle, real script: the head adds a secret-shaped file AND
+# the allowlist line that exempts it. Every count balances, so only the
+# allowlist refusal can catch it.
+scenario allowsmuggle
+secret_line > "$FX/settings.txt"
+printf 'settings.txt  # fixture: smuggled exemption\n' >> "$FX/.secret-scan-allow"
+git -C "$FX" add settings.txt .secret-scan-allow && git -C "$FX" commit -q -m allowsmuggle
+run_step diff main
+expect "allowlist change that exempts a path in the same diff is refused" nonzero "this PR changes .secret-scan-allow and the scan skipped 1 path(s) as allowlisted"
+
+# Allowlist-only change, real script: a line for a path NOT in the diff, so
+# nothing in the diff is skipped as allowlisted.
+scenario allowonly
+printf 'unrelated.txt  # fixture: path not in this diff\n' >> "$FX/.secret-scan-allow"
+git -C "$FX" add .secret-scan-allow && git -C "$FX" commit -q -m allowonly
+run_step diff main
+expect "allowlist-only change with no allowlisted skip passes" 0 "1 read plus 0 named skip(s) = 1 accounted for, of 1"
+
 # ── Stubbed script: output that under-counts, without touching the real one ──
 STUB="$WORK/stub"
 mkdir -p "$STUB/scripts"
